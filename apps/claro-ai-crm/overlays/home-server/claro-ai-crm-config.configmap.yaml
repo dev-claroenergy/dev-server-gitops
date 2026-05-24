@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claro-ai-crm-config
+  namespace: claro-ai-crm
+data:
+  PG_HOST: postgres-rw.postgres.svc.cluster.local
+  PG_PORT: "5432"
+  PG_DATABASE: claro-ai-crm
+  OIDC_ISSUER: http://authentik.claro-ai-crm.test/application/o/claro-crm/
+  OIDC_CLIENT_ID: claro-crm
+  OIDC_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/api/auth/callback
+  OIDC_POST_LOGOUT_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/
+  EVIDENCE_STORAGE_ROOT: ./var/evidence

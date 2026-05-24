@@ -3,4 +3,6 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
+  - claro-ai-crm-config.configmap.yaml
   - claro-ai-crm-db.sealedsecret.yaml
+  - claro-ai-crm-env.sealedsecret.yaml
