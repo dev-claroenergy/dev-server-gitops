@@ -5,6 +5,10 @@ metadata:
   namespace: claro-ai-crm
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - claro-ai-crm.claro-ai-crm.test
+      secretName: claro-ai-crm-tls
   rules:
     - host: claro-ai-crm.claro-ai-crm.test
       http:

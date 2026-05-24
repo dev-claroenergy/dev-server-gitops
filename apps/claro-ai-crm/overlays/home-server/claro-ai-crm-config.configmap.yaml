@@ -9,7 +9,7 @@ data:
   PG_DATABASE: claro-ai-crm
   OIDC_ISSUER: http://authentik.claro-ai-crm.test/application/o/claro-crm/
   OIDC_CLIENT_ID: claro-crm
-  OIDC_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/api/auth/callback
-  OIDC_POST_LOGOUT_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/
+  OIDC_REDIRECT_URI: https://claro-ai-crm.claro-ai-crm.test/api/auth/callback
+  OIDC_POST_LOGOUT_REDIRECT_URI: https://claro-ai-crm.claro-ai-crm.test/
   EVIDENCE_STORAGE_ROOT: ./var/evidence
   NODE_ENV: development

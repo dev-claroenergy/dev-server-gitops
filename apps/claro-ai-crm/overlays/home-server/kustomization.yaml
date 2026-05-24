@@ -7,3 +7,4 @@ resources:
   - claro-ai-crm-config.configmap.yaml
   - claro-ai-crm-db.sealedsecret.yaml
   - claro-ai-crm-env.sealedsecret.yaml
+  - claro-ai-crm-tls.sealedsecret.yaml
