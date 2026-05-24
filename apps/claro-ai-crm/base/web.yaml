@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: claro-ai-crm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: registry.claro-ai-crm.test/claro-ai-crm/web:dev-v0.0.1
+          ports:
+            - containerPort: 80
+          envFrom:
+            - configMapRef:
+                name: claro-ai-crm-config
+            - secretRef:
+                name: claro-ai-crm-env
+          env:
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: claro-ai-crm-db
+                  key: username
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: claro-ai-crm-db
+                  key: password
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: claro-ai-crm
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 80
