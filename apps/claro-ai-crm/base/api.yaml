@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: registry.claro-ai-crm.test/claro-ai-crm/api:dev-v0.0.1
+          image: registry.claro-ai-crm.test/claro-ai-crm/api:dev-v0.0.2
           ports:
             - containerPort: 3000
           envFrom:

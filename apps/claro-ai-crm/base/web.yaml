@@ -24,6 +24,8 @@ spec:
             - secretRef:
                 name: claro-ai-crm-env
           env:
+            - name: NGINX_API_UPSTREAM
+              value: http://api:3000
             - name: PG_USER
               valueFrom:
                 secretKeyRef:
