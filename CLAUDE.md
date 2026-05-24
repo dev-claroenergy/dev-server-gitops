@@ -1,15 +1,14 @@
-# home-server-gitops
+# dev-server-gitops
 
-GitOps repo for a single-node k3s cluster the owner uses for **local development** but wants run as a **stable, production-shaped environment** — no "it's only dev" shortcuts. ArgoCD pulls from this repo and reconciles cluster state.
+GitOps repo for a single-node k3s cluster (`claro-ai-crm-dev`) running on GCP, used as a **stable, production-shaped dev environment** — no "it's only dev" shortcuts. ArgoCD pulls from this repo and reconciles cluster state.
 
 ## How to work in this repo (read before editing)
 
-The owner is **learning ArgoCD and kubectl** and is using this repo as a hands-on teaching exercise. When making changes:
-
-- **Teach, don't just edit.** Before changing YAML, explain what you're doing, why it's the community best practice, and what the alternative would have been. Use accurate terminology (Application, AppProject, sync wave, kustomize overlay, CR vs CRD) so the owner can grep docs for more.
-- **One lesson per step.** Don't bundle a typo fix with a refactor. Land each change atomically so the lesson is clear in `git log`.
 - **Production-shaped, not production-scale.** Apply *stability* conventions immediately (proper layout, secrets tooling, sync waves, `ServerSideApply`, resource limits). Defer *scale* conventions until needed (HA replicas, ApplicationSets, multi-cluster generators) — on a single node they're YAGNI.
 - **Don't propose "we'll fix it later when it matters."** Doing it right the first time is the point.
+- **One concern per commit.** Don't bundle a config fix with a refactor. Atomic commits keep `git log` readable and ArgoCD diffs clean.
+- **After any ConfigMap or Secret change, restart the affected Deployment.** Kubernetes does not restart pods automatically when ConfigMaps change. Always run `kubectl rollout restart deployment/<name> -n <ns>` after pushing.
+- **kubeseal binary lives in the repo root** (`./kubeseal`). It is not installed system-wide. Use `./kubeseal` or the full path when sealing secrets.
 
 ## Architecture
 
@@ -25,37 +24,44 @@ App-of-apps pattern, split into two layers governed by two `AppProject` boundari
 
 **Bootstrap order:** AppProjects MUST be applied before any Application that references them. Apply `bootstrap/projects/` first, then the two root manifests.
 
-Each subdirectory under `infrastructure/<name>/` or `apps/<name>/` holds one `application.yaml` (an ArgoCD `Application` CR). If the Application deploys in-repo manifests, those live under `<name>/manifests/`.
+Each subdirectory under `infrastructure/<name>/` or `apps/<name>/` holds one `application.yaml` (an ArgoCD `Application` CR). Manifest-based apps use `base/` + `overlays/<cluster>/` kustomize layout.
 
 Current state:
 - `infrastructure/cloudnative-pg/` — CNPG operator, Helm chart from `cloudnative-pg.github.io/charts`, namespace `cnpg-system`.
 - `infrastructure/sealed-secrets/` — Bitnami sealed-secrets controller in `kube-system` (renamed to `sealed-secrets-controller` so `kubeseal` defaults work).
-- `apps/postgres/` — a `postgresql.cnpg.io/v1` `Cluster` in namespace `postgres`, backing Authentik. Kustomize layout: `base/` + `overlays/home-server/`.
-- `apps/authentik/` — SSO/identity provider, Helm chart from `charts.goauthentik.io`, namespace `authentik`. Multi-source Application (chart + values ref + supplementary kustomize overlay containing the SealedSecret, a bundled redis Deployment/Service, and an explicit Namespace). Exposed via Traefik at `authentik.home-server.local`.
+- `infrastructure/registry/` — private Docker registry (`registry:2`) at `https://registry.claro-ai-crm.test`. htpasswd auth, TLS via self-signed cert sealed in the overlay.
+- `apps/postgres/` — a `postgresql.cnpg.io/v1` `Cluster` in namespace `postgres`, backing Authentik and claro-ai-crm. Kustomize layout: `base/` + `overlays/home-server/`. Includes `Database` CRs for `authentik` and `claro-ai-crm`.
+- `apps/authentik/` — SSO/identity provider, Helm chart from `charts.goauthentik.io`, namespace `authentik`. Multi-source Application (chart + values ref + supplementary kustomize overlay containing the SealedSecret, a bundled redis Deployment/Service, and an explicit Namespace). Exposed via Traefik at `http://authentik.claro-ai-crm.test` (HTTP only).
+- `apps/claro-ai-crm/` — main application. Two containers: `api` (Hono/Node.js, port 3000) and `web` (nginx serving a Vue SPA, port 80). HTTPS via self-signed cert. OIDC login via Authentik. Database via CNPG postgres cluster.
 
 ## Hostname & Ingress
 
-k3s ships Traefik in `kube-system` as the default ingress controller (LoadBalancer service `kube-system/traefik`). HTTP-only for now — no TLS, no cert-manager.
+k3s ships Traefik in `kube-system` as the default ingress controller (LoadBalancer service `kube-system/traefik`).
 
-**Cluster ingress IP:** `192.168.31.218` — the external IP of the Traefik LoadBalancer service (`kube-system/traefik`). Verify with:
+**Cluster ingress IP:** the external IP of the Traefik LoadBalancer service. Verify with:
 ```bash
 kubectl get svc -n kube-system traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 ```
-All `*.home-server.local` traffic terminates here and Traefik routes by Host header.
 
-**Hostname convention:** `<app>.home-server.local` for any app that needs browser access. The cluster expects clients to resolve these names to `192.168.31.218` — set up however you prefer (LAN DNS server with a wildcard, per-workstation `/etc/hosts` entry, etc.). DNS provisioning is out of scope for this repo; the cluster only owns the Ingress configuration.
+**Traefik ClusterIP** (used for CoreDNS in-cluster resolution): `10.43.167.97`. Verify: `kubectl get svc traefik -n kube-system -o jsonpath='{.spec.clusterIP}'`
 
-**Gotcha:** `.local` is reserved by mDNS. Works fine on Linux without Avahi; Apple devices (macOS/iOS) will likely fail to resolve via unicast DNS. If cross-device support becomes necessary, migrate the wildcard scheme to `.lan` or `.internal` (RFC 8375) — requires updating the chart values in every overlay and any external DNS records.
+**Hostname convention:** `<app>.claro-ai-crm.test`. DNS is provided via `/etc/hosts` entries on each workstation pointing to the node's external IP. DNS provisioning is out of scope for this repo.
+
+**TLS:** The registry and claro-ai-crm use HTTPS with self-signed certs (SealedSecrets in the respective overlays). Authentik is HTTP-only. No cert-manager.
 
 **To expose a new HTTP app:**
-1. In the app's chart values (or `Ingress` manifest), set `ingressClassName: traefik` and `hosts: [<app>.home-server.local]`.
-2. Browse to `http://<app>.home-server.local` — Pi-hole resolves it, Traefik routes by Host header.
+1. In the app's chart values (or `Ingress` manifest), set `ingressClassName: traefik` and `hosts: [<app>.claro-ai-crm.test]`.
+2. Add the hostname to `/etc/hosts` on each workstation.
 
 No need to touch the AppProject — `Ingress` is namespaced, allowed by `apps`' `namespaceResourceWhitelist: '*'`.
 
-**To expose a TCP service (e.g. Postgres):** Traefik doesn't handle non-HTTP by default. Use a `Service` of `type: LoadBalancer` — k3s's klipper-lb assigns it the same node IP as Traefik, but on whatever port you declare. Example: `apps/postgres/overlays/home-server/postgres-rw-external.yaml` exposes the CNPG primary on `5432`. Pi-hole's wildcard means `postgres.home-server.local:5432` resolves to the right IP automatically — no separate DNS record needed.
+**To expose a TCP service (e.g. Postgres):** Use a `Service` of `type: LoadBalancer`. Example: `apps/postgres/overlays/home-server/postgres-rw-external.yaml` exposes the CNPG primary on `5432`. The external IP is the node IP — no separate DNS entry needed if connecting by IP.
 
 Don't modify operator-managed services. Always create a *new* Service that selects the same pods. CNPG owns `postgres-rw`/`postgres-ro`/`postgres-r` (ClusterIP); we add `postgres-rw-external` (LoadBalancer) alongside.
+
+**Traefik path priority gotcha:** Traefik v3 computes route priority by rule string length. `PathPrefix(/)` (longer string) beats `Path(/me)` (shorter string) — meaning a catch-all `/` Prefix route wins over a more specific Exact route. **Do not try to route specific API paths via Ingress path rules.** Instead, use nginx to own all routing decisions within the web container (see claro-ai-crm nginx-config ConfigMap pattern).
+
+**In-cluster DNS for `*.claro-ai-crm.test`:** pods inside the cluster cannot resolve these hostnames by default (they only exist in workstation `/etc/hosts`). A CoreDNS custom ConfigMap resolves them to the Traefik ClusterIP. See `docs/runbooks/claro-ai-crm-bootstrap.md` Step 1. **Always include both A and AAAA templates** — without the AAAA template, Node.js resolvers get SERVFAIL and abort even though the A record is correct.
 
 ## Sync ordering
 
@@ -106,6 +112,7 @@ ArgoCD provides three ordering mechanisms; pick the right one for the right prob
 - Before committing kustomize changes, sanity-check the build: `kubectl kustomize apps/<name>/overlays/<cluster>/`. Catches malformed references before ArgoCD does.
 - All Applications use `automated.prune: true` + `automated.selfHeal: true`. Use `ServerSideApply=true` for anything with CRDs or large objects.
 - Use `sync-wave` annotations when one Application depends on CRDs or services from another (e.g. `postgres` waits for the CNPG operator).
+- Set `revisionHistoryLimit: 3` on all Deployments. Kubernetes default is 10, which causes dead ReplicaSets to accumulate during active development. 3 is enough for rollback.
 - **Secrets use Sealed-Secrets.** Never commit a raw `Secret` manifest. Always go through `kubeseal` to produce a `SealedSecret` CR — those ARE committable. Naming convention: `<secret-name>.sealedsecret.yaml`, colocated in the consuming app's kustomize **overlay** (e.g. `apps/postgres/overlays/home-server/postgres-authentik.sealedsecret.yaml`) — not the base, since SealedSecrets are cluster-specific.
 - Sealed-Secrets are **strict-scoped by default** — encrypted for the exact `namespace/name` pair. Renaming or moving the `SealedSecret` to a different namespace breaks decryption. This is the security property we want; don't override it without a reason.
 - The sealed-secrets controller's master key lives in `kube-system` (selector: `sealedsecrets.bitnami.com/sealed-secrets-key`). It's the only thing that can decrypt SealedSecrets in this repo — backed up to the owner's password manager. Restoration procedure in `README.md`.
@@ -115,13 +122,13 @@ ArgoCD provides three ordering mechanisms; pick the right one for the right prob
 
 ## Private Docker registry
 
-`infrastructure/registry/` runs `registry:2` exposed at `https://registry.home-server.local` via Traefik. htpasswd auth, sealed creds in `infrastructure/registry/overlays/home-server/registry-auth.sealedsecret.yaml`. TLS terminated by a self-signed cert (10-year validity, CN matches hostname) stored in `registry-tls.sealedsecret.yaml`; private key never leaves the cluster.
+`infrastructure/registry/` runs `registry:2` exposed at `https://registry.claro-ai-crm.test` via Traefik. htpasswd auth (username: `homelab`), sealed creds in `infrastructure/registry/overlays/home-server/registry-auth.sealedsecret.yaml`. TLS terminated by a self-signed cert (10-year validity, CN=`registry.claro-ai-crm.test`) stored in `registry-tls.sealedsecret.yaml`; private key never leaves the cluster.
 
 **Two pieces of host-level state live outside this repo** (one-time setup, documented in `README.md`):
-- Workstation: the registry's CA cert at `/etc/docker/certs.d/registry.home-server.local/ca.crt`. Extract from cluster: `kubectl get secret registry-tls -n registry -o jsonpath='{.data.tls\.crt}' | base64 -d`. Docker auto-discovers it; no daemon restart needed.
-- k3s host: `/etc/rancher/k3s/registries.yaml` with `auth.username` / `auth.password` and `tls.ca_file` pointing to the same CA cert (also copied to the host). Containerd pulls authenticated automatically — **no per-namespace imagePullSecrets needed.**
+- Workstation: the registry's CA cert at `/etc/docker/certs.d/registry.claro-ai-crm.test/ca.crt`. Extract from cluster: `kubectl get secret registry-tls -n registry -o jsonpath='{.data.tls\.crt}' | base64 -d`. Docker auto-discovers it; no daemon restart needed.
+- k3s host: `/etc/rancher/k3s/registries.yaml` with `auth.username` / `auth.password` and `tls.ca_file` pointing to the same CA cert (also copied to the host). Also requires `127.0.0.1 registry.claro-ai-crm.test` in the node's `/etc/hosts` so containerd can resolve the hostname. Containerd pulls authenticated automatically — **no per-namespace imagePullSecrets needed.**
 
-**Build → push → deploy workflow:** `docker build -t registry.home-server.local/<app>:<tag>` → `docker push registry.home-server.local/<app>:<tag>` → reference `image: registry.home-server.local/<app>:<tag>` in any Deployment manifest under `apps/`. The cluster pulls via the containerd config.
+**Build → push → deploy workflow:** `docker build -t registry.claro-ai-crm.test/<app>:<tag>` → `docker push registry.claro-ai-crm.test/<app>:<tag>` → reference `image: registry.claro-ai-crm.test/<app>:<tag>` in any Deployment manifest under `apps/`. The cluster pulls via the containerd config.
 
 **Storage**: 20 GiB PVC on `local-path`. Inspect usage with `kubectl exec -n registry deploy/registry -- du -sh /var/lib/registry`. When it fills up, bump the PVC size and let CSI resize.
 
@@ -140,9 +147,43 @@ Use CNPG's declarative primitives — never manual `psql` against the cluster fo
 
 **Never** manually `CREATE USER` or `CREATE DATABASE` against the cluster from psql — git becomes the lying source of truth, and the next cluster rebuild loses everything.
 
+## claro-ai-crm application specifics
+
+The `apps/claro-ai-crm/` app has patterns not used elsewhere in this repo. Read this before touching it.
+
+**Two-container layout:**
+- `api` — Hono/Node.js backend, port 3000. Handles all business logic, OIDC callback, session management, database queries via Prisma.
+- `web` — nginx serving a pre-built Vue SPA, port 80. Proxies API calls to the `api` service internally.
+
+**nginx routing override:** the Vue frontend was built without `VITE_API_BASE_URL` set, so it calls `/me`, `/auth/*`, `/health` directly (no `/api/` prefix). The nginx container's default template only proxied `/api/*`. To fix this without rebuilding the image, a `nginx-config` ConfigMap overrides `/etc/nginx/templates/default.conf.template` — nginx's entrypoint runs `envsubst` on this file at startup. The ConfigMap is in `overlays/home-server/nginx-config.configmap.yaml`. **Do not attempt to fix the routing via Traefik Ingress path rules** — Traefik v3 path priority makes this unreliable (see Traefik gotcha in the Hostname section).
+
+**HTTPS:** the app uses a self-signed cert for `claro-ai-crm.claro-ai-crm.test` stored in `claro-ai-crm-tls.sealedsecret.yaml`. The CA cert must be installed on workstations (`/usr/local/share/ca-certificates/claro-ai-crm.crt`).
+
+**OIDC / Authentik:** the app integrates with Authentik via OIDC. The provider and application in Authentik are **not managed in git** — they live in Authentik's database and must be recreated manually on a fresh cluster. See `docs/runbooks/claro-ai-crm-bootstrap.md` Step 2. Key env vars:
+- `OIDC_ISSUER` — must be HTTP (Authentik has no TLS). `NODE_ENV=development` bypasses the app's HTTPS enforcement on the issuer.
+- `OIDC_REDIRECT_URI` — must be HTTPS (`https://claro-ai-crm.claro-ai-crm.test/api/auth/callback`) to match the Authentik provider config.
+
+**Database migrations:** Prisma migrations are NOT applied automatically by ArgoCD. On a fresh cluster, run `prisma migrate deploy` via port-forward. See `docs/runbooks/claro-ai-crm-bootstrap.md` Step 3. Use `sslmode=disable` and forward to the **pod** (not the service) to avoid SSL negotiation errors.
+
+**Session cookie:** the app sets a `claro_session` HttpOnly cookie. `secure` is set to `false` when `NODE_ENV=development`. The frontend checks auth by calling `GET /me` — if this returns HTML instead of JSON, the nginx routing is broken.
+
+**Manual steps required on every fresh cluster** (not handled by ArgoCD):
+1. CoreDNS custom ConfigMap for `*.claro-ai-crm.test` in-cluster resolution
+2. Authentik OIDC provider + application creation
+3. `prisma migrate deploy` via port-forward
+4. First user role promotion: `UPDATE "User" SET role = 'ADMIN' WHERE email = '...'`
+
 ## Repo URL
 
-`https://github.com/alan-alvarenga-telus/home-server-gitops` — referenced from Application `repoURL` fields. Update both if the repo moves.
+`https://github.com/dev-claroenergy/dev-server-gitops.git` — referenced from Application `repoURL` fields.
+
+**When forking this repo**, update the URL in **four** places — all must match or ArgoCD rejects the Applications with `InvalidSpecError: repo not permitted`:
+1. `bootstrap/projects/infrastructure.yaml` — `sourceRepos`
+2. `bootstrap/projects/apps.yaml` — `sourceRepos`
+3. `bootstrap/infrastructure.yaml` — `spec.source.repoURL`
+4. `bootstrap/apps.yaml` — `spec.source.repoURL`
+
+Files 1–2 and 3–4 are independently applied with `kubectl apply`. Re-apply all four after updating, then force a hard refresh on the root Applications.
 
 ## Validation
 
