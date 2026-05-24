@@ -9,7 +9,7 @@ spec:
   description: Platform layer — operators, controllers, cluster-scoped services
 
   sourceRepos:
-    - https://github.com/alan-alvarenga-telus/home-server-gitops.git
+    - https://github.com/dev-claroenergy/dev-server-gitops.git
     - https://cloudnative-pg.github.io/charts
     - https://bitnami-labs.github.io/sealed-secrets
 

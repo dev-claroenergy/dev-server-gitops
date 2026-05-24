@@ -10,7 +10,7 @@ metadata:
 spec:
   project: apps
   source:
-    repoURL: https://github.com/alan-alvarenga-telus/home-server-gitops.git
+    repoURL: https://github.com/dev-claroenergy/dev-server-gitops.git
     targetRevision: HEAD
     path: apps/claro-ai-crm/overlays/home-server
   destination:

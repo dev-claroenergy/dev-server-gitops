@@ -9,7 +9,7 @@ spec:
   description: Workload layer — user-facing services consuming infrastructure capabilities
 
   sourceRepos:
-    - https://github.com/alan-alvarenga-telus/home-server-gitops.git
+    - https://github.com/dev-claroenergy/dev-server-gitops.git
     - https://charts.goauthentik.io
 
   destinations:

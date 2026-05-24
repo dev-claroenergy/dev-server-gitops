@@ -17,10 +17,10 @@ spec:
         releaseName: authentik
         valueFiles:
           - $values/apps/authentik/overlays/home-server/values.yaml
-    - repoURL: https://github.com/alan-alvarenga-telus/home-server-gitops.git
+    - repoURL: https://github.com/dev-claroenergy/dev-server-gitops.git
       targetRevision: HEAD
       ref: values
-    - repoURL: https://github.com/alan-alvarenga-telus/home-server-gitops.git
+    - repoURL: https://github.com/dev-claroenergy/dev-server-gitops.git
       targetRevision: HEAD
       path: apps/authentik/overlays/home-server
   destination:
