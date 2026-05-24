@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: claro-ai-crm
+data:
+  default.conf.template: |
+    server {
+        listen      80;
+        listen      [::]:80;
+        server_name _;
+
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript
+                   text/xml application/xml text/javascript;
+
+        root  /usr/share/nginx/html;
+        index index.html;
+
+        # API endpoints the frontend calls without /api/ prefix.
+        # These must come before the SPA catch-all.
+        location = /me {
+            proxy_pass         ${NGINX_API_UPSTREAM}/me;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Cookie            $http_cookie;
+        }
+
+        location /auth/ {
+            proxy_pass         ${NGINX_API_UPSTREAM}/auth/;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Cookie            $http_cookie;
+        }
+
+        location = /health {
+            proxy_pass         ${NGINX_API_UPSTREAM}/health;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        # Legacy /api/* prefix — kept for compatibility with any direct calls.
+        location /api/ {
+            proxy_pass         ${NGINX_API_UPSTREAM}/;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Cookie            $http_cookie;
+        }
+
+        # SPA fallback — Vue Router history mode.
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }

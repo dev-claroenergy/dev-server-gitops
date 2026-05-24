@@ -13,11 +13,19 @@ spec:
       labels:
         app: web
     spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
       containers:
         - name: web
           image: registry.claro-ai-crm.test/claro-ai-crm/web:dev-v0.0.1
           ports:
             - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/templates/default.conf.template
+              subPath: default.conf.template
           envFrom:
             - configMapRef:
                 name: claro-ai-crm-config
