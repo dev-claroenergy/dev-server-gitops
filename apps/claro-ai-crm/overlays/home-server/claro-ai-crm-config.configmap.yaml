@@ -12,3 +12,4 @@ data:
   OIDC_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/api/auth/callback
   OIDC_POST_LOGOUT_REDIRECT_URI: http://claro-ai-crm.claro-ai-crm.test/
   EVIDENCE_STORAGE_ROOT: ./var/evidence
+  NODE_ENV: development
