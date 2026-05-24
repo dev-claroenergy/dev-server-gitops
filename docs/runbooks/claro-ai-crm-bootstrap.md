@@ -273,6 +273,64 @@ If the discovery endpoint fails, CoreDNS custom config is missing or broken.
 
 ---
 
+## Connecting to the database from your workstation
+
+Use `kubectl port-forward` to access postgres directly for admin tasks (migrations, role updates, schema inspection).
+
+**Important:** always forward to the **pod** (not the service) and use a non-standard local port (5433) to avoid conflicts with a locally running postgres. Also require `sslmode=disable` — CNPG has SSL on but `pg_hba.conf` uses `host` (not `hostssl`), so non-SSL connections are valid; the SSL negotiation through the port-forward causes "connection reset by peer" otherwise.
+
+**Get the pod name and credentials:**
+```bash
+kubectl get pod -n postgres -l cnpg.io/instanceRole=primary
+# e.g. postgres-1
+
+PG_PASSWORD=$(kubectl get secret claro-ai-crm-db -n claro-ai-crm \
+  -o jsonpath='{.data.password}' | base64 -d)
+```
+
+**Open the port-forward in a dedicated terminal and keep it running:**
+```bash
+# Terminal 1 — leave open for the duration of your session
+kubectl port-forward -n postgres pod/postgres-1 5433:5432
+# Output: Forwarding from 127.0.0.1:5433 -> 5432
+```
+
+**Connect with psql (Terminal 2):**
+```bash
+psql "postgresql://claro-ai-crm:${PG_PASSWORD}@localhost:5433/claro-ai-crm?sslmode=disable"
+```
+
+**Connect with any GUI tool (TablePlus, DBeaver, DataGrip, etc.):**
+```
+Host:     localhost
+Port:     5433
+Database: claro-ai-crm
+Username: claro-ai-crm
+Password: <from above>
+SSL:      disable / prefer (not require)
+```
+
+**Connect as superuser** (for admin tasks like `CREATE EXTENSION`, inspecting all schemas):
+```bash
+PG_SUPER=$(kubectl get secret postgres-superuser -n postgres \
+  -o jsonpath='{.data.password}' | base64 -d)
+psql "postgresql://postgres:${PG_SUPER}@localhost:5433/claro-ai-crm?sslmode=disable"
+```
+
+**Run Prisma migrations** (from the `@claro/db` package directory in the app repo):
+```bash
+DATABASE_URL="postgresql://claro-ai-crm:${PG_PASSWORD}@localhost:5433/claro-ai-crm?schema=public&sslmode=disable" \
+  pnpm exec prisma migrate deploy
+```
+
+**Check migration status:**
+```bash
+DATABASE_URL="postgresql://claro-ai-crm:${PG_PASSWORD}@localhost:5433/claro-ai-crm?schema=public&sslmode=disable" \
+  pnpm exec prisma migrate status
+```
+
+---
+
 ## Images: build and push
 
 ```bash

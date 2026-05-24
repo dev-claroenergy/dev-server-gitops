@@ -81,15 +81,15 @@ Two `AppProject`s scope what each layer can do. The `apps` project allows **only
 ## Prerequisites
 
 **On the cluster host:**
-- Linux (tested: Ubuntu 7.0.0, k3s v1.35.5+k3s1)
-- 4 GB RAM minimum, 8 GB recommended
+- Linux (tested: Debian 12 Bookworm on GCP, k3s v1.35.5+k3s1)
+- 4 GB RAM minimum, 8 GB recommended; **50 GiB disk minimum** (image pulls fill small disks fast)
 - A user with `sudo`
 - `curl`, `openssl` available
 
 **On your workstation:**
 - `kubectl` 1.32+
 - `git`
-- A password manager — you'll save two database passwords and one sealed-secrets master key
+- A password manager — you'll save database passwords, the registry password, OIDC secrets, and the sealed-secrets master key
 
 ## Bootstrap from zero
 
@@ -102,12 +102,12 @@ Ten tiers, manual through Tier 8, GitOps from Tier 9 forward. Each tier ends wit
 curl -sfL https://get.k3s.io | sh -
 
 # Copy kubeconfig to your workstation
-sudo cat /etc/rancher/k3s/k3s.yaml > ~/kubeconfig-home-server
-# Edit ~/kubeconfig-home-server: replace 127.0.0.1 with the host's LAN IP
-export KUBECONFIG=~/kubeconfig-home-server
+sudo cat /etc/rancher/k3s/k3s.yaml > ~/kubeconfig-claro-ai-crm
+# Edit the file: replace 127.0.0.1 with the node's external IP
+export KUBECONFIG=~/kubeconfig-claro-ai-crm
 ```
 
-**Verify:** `kubectl get nodes` shows `home-server   Ready`.
+**Verify:** `kubectl get nodes` shows `claro-ai-crm-dev   Ready`.
 
 ### Tier 1: Install ArgoCD
 
@@ -150,7 +150,7 @@ kubectl get appproject -n argocd
 # Expected: default, infrastructure, apps
 
 kubectl get application -n argocd
-# Expected: infrastructure, apps, cloudnative-pg, sealed-secrets, postgres, authentik
+# Expected: infrastructure, apps, cloudnative-pg, sealed-secrets, registry, postgres, authentik, claro-ai-crm
 ```
 
 The `postgres` and `authentik` Applications will show `OutOfSync` until you finish Tiers 4–5 (sealing all credentials). That's expected — keep going.
@@ -171,7 +171,7 @@ kubectl -n kube-system get secret \
 ```
 
 **NOW, before doing anything else:**
-1. Open `sealed-secrets-master.key` and paste the entire contents into a secure note in your password manager. Title it `home-server sealed-secrets master key`.
+1. Open `sealed-secrets-master.key` and paste the entire contents into a secure note in your password manager. Title it `claro-ai-crm sealed-secrets master key`.
 2. Shred the local copy. The file is in `.gitignore` but you still don't want it sitting around.
 
 ```bash
@@ -225,7 +225,7 @@ kubectl create secret generic postgres-superuser \
 If any raw `Secret` with these names already exists in the cluster (from a partial bootstrap), delete them so the sealed-secrets controller can claim ownership:
 
 ```bash
-kubectl delete secret postgres-authentik postgres-superuser postgres-uthentik \
+kubectl delete secret postgres-authentik postgres-superuser \
   -n postgres --ignore-not-found
 ```
 
@@ -296,7 +296,7 @@ kubectl get pods -n authentik
 
 ### Tier 7: Hostname & Ingress
 
-Apps are exposed at `http://<app>.home-server.local` via Traefik (k3s's default ingress controller). The cluster requires DNS to resolve these names to Traefik's external IP. **How you provide DNS is your concern** — this repo only owns the Ingress configuration.
+Apps are exposed at `<app>.claro-ai-crm.test` via Traefik. DNS must resolve these names to Traefik's external IP on every workstation that needs access. **How you provide DNS is your concern** — this repo only owns the Ingress configuration.
 
 ```bash
 # Confirm Traefik's external IP (the value clients need to reach)
@@ -305,19 +305,19 @@ TRAEFIK_IP=$(kubectl get svc -n kube-system traefik \
 echo "Traefik IP: $TRAEFIK_IP"
 ```
 
-Pick one DNS approach:
+Add entries to `/etc/hosts` on each workstation:
+```bash
+echo "$TRAEFIK_IP argocd.claro-ai-crm.test" | sudo tee -a /etc/hosts
+echo "$TRAEFIK_IP authentik.claro-ai-crm.test" | sudo tee -a /etc/hosts
+echo "$TRAEFIK_IP registry.claro-ai-crm.test" | sudo tee -a /etc/hosts
+echo "$TRAEFIK_IP claro-ai-crm.claro-ai-crm.test" | sudo tee -a /etc/hosts
+```
 
-- **Per-workstation `/etc/hosts`** (zero infrastructure, doesn't scale beyond one machine):
-  ```bash
-  echo "$TRAEFIK_IP authentik.home-server.local" | sudo tee -a /etc/hosts
-  ```
-- **LAN-wide DNS server with a wildcard for `*.home-server.local`** — set this up out of band on whatever resolver your LAN uses. Once configured, every device on the LAN reaches every app by name with no per-device setup.
-
-Open `http://authentik.home-server.local` in your browser. Log in with:
+Open `http://authentik.claro-ai-crm.test` in your browser. Log in with:
 - Username: `akadmin`
 - Password: the `AK_BOOTSTRAP_PASSWORD` you saved in Tier 5
 
-Note: HTTP only, no TLS yet. Cert-manager + Let's Encrypt is a future improvement.
+**TLS:** Authentik runs HTTP-only. The registry and claro-ai-crm app use self-signed HTTPS certs — install their CA certs on your workstation (see Tier 8 and the claro-ai-crm runbook).
 
 ### Tier 8: Private Docker registry — workstation + k3s host config
 
@@ -412,25 +412,32 @@ A PostgreSQL version banner means: k3s → ArgoCD → CNPG operator → Cluster 
 **Authentik via Traefik** — exercises the ingress path:
 
 ```bash
-curl -sI http://authentik.home-server.local | head -5
+curl -sI http://authentik.claro-ai-crm.test | head -5
 # Expected: HTTP/1.1 302 Found, Location: /if/flow/initial-setup/ (or /if/flow/default-authentication-flow/)
 ```
 
 A 302 to an Authentik flow means: Traefik → Authentik server → Postgres → Redis all reachable. If you instead get `curl: (6) Could not resolve host`, your `/etc/hosts` entry is missing. If you get a Traefik 404, the Ingress hasn't reconciled yet — wait a moment and retry.
+
+**claro-ai-crm** — verify HTTPS and session auth:
+```bash
+curl -sk https://claro-ai-crm.claro-ai-crm.test/me
+# Expected: {"error":{"code":"unauthenticated","message":"Not signed in"}}
+# (401 JSON = API is up. HTML = nginx routing broken — see runbook.)
+```
 
 ## Day-2 operations
 
 - **Add a new app:** create `apps/<name>/application.yaml`, commit, push. The `apps` root picks it up via recursive scan.
 - **Add a new operator/controller:** same shape under `infrastructure/<name>/`. If it pulls from a new Helm repo, add the repo URL to `bootstrap/projects/infrastructure.yaml` and **re-apply that file manually** — AppProjects aren't reconciled by ArgoCD yet.
 - **Add a new credential:** generate the value, seal it with `kubeseal`, commit the `.sealedsecret.yaml` next to the app that consumes it.
-- **Expose a new HTTP app via Traefik:** in the app's chart values (or its own `Ingress` manifest), set `ingressClassName: traefik` and a hostname matching `<app>.home-server.local`. Browse to `http://<app>.home-server.local`. Pi-hole's wildcard handles DNS; no AppProject change needed (Ingress is namespaced).
-- **Expose a TCP service (database, broker, etc.) to the LAN:** add a `Service` of `type: LoadBalancer` selecting the target pods. Example: `apps/postgres/overlays/home-server/postgres-rw-external.yaml`. The same wildcard hostname `<service>.home-server.local` resolves to the cluster IP — connect with `host:<port>` in your client (e.g. `psql -h postgres.home-server.local -p 5432`). Don't modify operator-managed Services; always add a new one alongside.
+- **Expose a new HTTP app via Traefik:** in the app's chart values (or its own `Ingress` manifest), set `ingressClassName: traefik` and a hostname matching `<app>.claro-ai-crm.test`. Add the hostname to `/etc/hosts` on each workstation. No AppProject change needed (Ingress is namespaced).
+- **Expose a TCP service (database, broker, etc.) to the LAN:** add a `Service` of `type: LoadBalancer` selecting the target pods. Example: `apps/postgres/overlays/home-server/postgres-rw-external.yaml`. The external IP will be the node's IP — connect with `host:<port>` in your client. Don't modify operator-managed Services; always add a new one alongside.
 - **Build and deploy a custom image:** build it locally and push to the in-cluster registry, then reference by tag in any Deployment manifest:
   ```bash
-  docker build -t registry.home-server.local/myapp:v0.1.0 .
-  docker push registry.home-server.local/myapp:v0.1.0
+  docker build -t registry.claro-ai-crm.test/myapp:v0.1.0 .
+  docker push registry.claro-ai-crm.test/myapp:v0.1.0
   ```
-  Then in your manifest: `image: registry.home-server.local/myapp:v0.1.0`. The k3s containerd authenticates to the registry automatically (see `/etc/rancher/k3s/registries.yaml` on the host), so no `imagePullSecrets` are needed in your Deployments. First-time setup requires per-workstation `/etc/docker/daemon.json` and per-host `/etc/rancher/k3s/registries.yaml` — see Tier 8 of the bootstrap.
+  Then in your manifest: `image: registry.claro-ai-crm.test/myapp:v0.1.0`. The k3s containerd authenticates automatically (via `/etc/rancher/k3s/registries.yaml` on the host), so no `imagePullSecrets` are needed. First-time setup: see Tier 8.
 - **Pause GitOps temporarily:** disable auto-sync on a specific Application in the UI. Re-enable when done. If you make changes by hand during the pause, commit them — `selfHeal: true` reverts manual edits on the next reconciliation loop.
 
 ## Troubleshooting
@@ -529,8 +536,8 @@ Fix: `rm` the empty file, re-run with correct flags, verify `wc -l <file>` is no
 
 ## What this README does NOT cover
 
-- **TLS.** Traefik serves HTTP only. No cert-manager, no Let's Encrypt. Browser shows a "not secure" warning. A future lesson will add cert-manager + a local CA (or Let's Encrypt staging) for `*.home-server.local`.
-- **DNS provisioning.** This repo only configures Ingress on the cluster. How `*.home-server.local` resolves is up to you (workstation `/etc/hosts`, LAN-wide DNS server, etc.).
+- **Full TLS.** The registry and claro-ai-crm use self-signed HTTPS. Authentik is HTTP-only. No cert-manager or Let's Encrypt. A future improvement would add cert-manager for automated certs across all services.
+- **DNS provisioning.** This repo only configures Ingress. How `*.claro-ai-crm.test` resolves is up to you — currently `/etc/hosts` entries on each workstation.
 - **Backups.** CNPG can back up to S3-compatible storage; not configured here.
 - **Monitoring.** No Prometheus, Grafana, or alerting. `monitoring.enablePodMonitor: false` in `apps/postgres/base/cluster.yaml`.
 - **Storage HA.** `local-path` is single-node only. Node loss = data loss.
