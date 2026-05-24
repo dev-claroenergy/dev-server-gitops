@@ -1,10 +1,39 @@
-# home-server-gitops
+# dev-server-gitops
 
-GitOps repo for a single-node k3s cluster (`home-server`). ArgoCD reconciles cluster state from `main`.
+GitOps repo for a single-node k3s cluster (`claro-ai-crm-dev`) running on GCP. ArgoCD reconciles cluster state from `main`.
 
 See [`CLAUDE.md`](./CLAUDE.md) for repository conventions and architecture detail. **This README is the runbook** — how to rebuild the cluster from zero, and how to fix it when it breaks.
 
-> **About this repo:** this is a learning-and-stability environment. The owner is intentionally taking the production-shaped path (proper AppProjects, sealed-secrets, sync waves) even though it's a homelab. If you find a step that doesn't work, that's normal — see [Troubleshooting](#troubleshooting) at the bottom and update the README with what you learned.
+> **About this repo:** production-shaped dev environment — proper AppProjects, sealed-secrets, sync waves, HTTPS, OIDC. If you find a step that doesn't work, update the README with what you learned.
+
+## Cluster quick-reference
+
+| Item | Value |
+|---|---|
+| Hostname | `claro-ai-crm-dev` |
+| Cloud | GCP (Debian 12, Bookworm) |
+| Node internal IP | `10.160.0.4` |
+| Node external IP | see GCP console (used in `/etc/hosts` on workstations) |
+| Traefik ClusterIP | `10.43.167.97` (verify: `kubectl get svc traefik -n kube-system -o jsonpath='{.spec.clusterIP}'`) |
+| Domain pattern | `*.claro-ai-crm.test` |
+| k3s version | `v1.35.5+k3s1` |
+| Disk | 50 GiB (`/dev/sda1`) |
+| Repo | `https://github.com/dev-claroenergy/dev-server-gitops.git` |
+
+## App URLs
+
+| App | URL |
+|---|---|
+| ArgoCD | `https://argocd.claro-ai-crm.test` |
+| Authentik (SSO) | `http://authentik.claro-ai-crm.test` |
+| Registry | `https://registry.claro-ai-crm.test` |
+| Claro AI CRM | `https://claro-ai-crm.claro-ai-crm.test` |
+| Postgres (external) | `postgres.claro-ai-crm.test:5432` (via LoadBalancer) |
+
+## Runbooks
+
+- [`docs/runbooks/claro-ai-crm-bootstrap.md`](./docs/runbooks/claro-ai-crm-bootstrap.md) — manual steps to bring claro-ai-crm fully online on a fresh cluster (CoreDNS, Authentik OIDC, DB migrations, user role)
+- [`docs/runbooks/ops-common-incidents.md`](./docs/runbooks/ops-common-incidents.md) — fixes for DiskPressure, sealed-secrets key loss, repo fork migration, registry auth, Traefik routing gotchas
 
 ## Architecture at a glance
 
@@ -24,7 +53,7 @@ infrastructure/            # Platform layer (operators, controllers, CRDs)
 apps/                      # Workload layer
   postgres/                # CNPG Cluster CR. Kustomize base/overlay.
     application.yaml
-    base/{kustomization.yaml,cluster.yaml}
+    base/{kustomization.yaml,cluster.yaml,databases/}
     overlays/home-server/{kustomization.yaml,*.sealedsecret.yaml}
   authentik/               # SSO IdP. Multi-source: chart + values ref + overlay.
     application.yaml
@@ -34,6 +63,17 @@ apps/                      # Workload layer
       values.yaml          # Helm values (NOT a k8s resource)
       authentik-env.sealedsecret.yaml
       redis.yaml           # bundled redis (chart 2026.5 dropped its subchart)
+  claro-ai-crm/            # Main application. Kustomize base/overlay.
+    application.yaml
+    base/{kustomization.yaml,api.yaml,web.yaml,ingress.yaml}
+    overlays/home-server/
+      kustomization.yaml
+      namespace.yaml
+      claro-ai-crm-config.configmap.yaml   # non-secret env vars
+      nginx-config.configmap.yaml          # nginx routing template override
+      claro-ai-crm-db.sealedsecret.yaml    # PG_USER, PG_PASSWORD
+      claro-ai-crm-env.sealedsecret.yaml   # OIDC_CLIENT_SECRET, SESSION_SECRET, DATABASE_URL
+      claro-ai-crm-tls.sealedsecret.yaml   # self-signed TLS cert for HTTPS
 ```
 
 Two `AppProject`s scope what each layer can do. The `apps` project allows **only `Namespace`** as a cluster-scoped resource — a deliberate guardrail against workload charts silently elevating to ClusterRoles/CRDs/etc.
@@ -92,16 +132,17 @@ kubectl port-forward -n argocd svc/argocd-server 8080:443
 Order matters: AppProjects must exist before any Application that references them.
 
 ```bash
-git clone https://github.com/alan-alvarenga-telus/home-server-gitops.git
-cd home-server-gitops
+git clone https://github.com/dev-claroenergy/dev-server-gitops.git
+cd dev-server-gitops
 
 # Projects FIRST
 kubectl apply -f bootstrap/projects/
 
 # Then the root Applications
-kubectl apply -f bootstrap/infrastructure.yaml
-kubectl apply -f bootstrap/apps.yaml
+kubectl apply -f bootstrap/infrastructure.yaml -f bootstrap/apps.yaml
 ```
+
+> **If forking this repo:** update the `repoURL` in three places after cloning and before applying: `bootstrap/projects/infrastructure.yaml`, `bootstrap/projects/apps.yaml`, and `bootstrap/infrastructure.yaml` + `bootstrap/apps.yaml`. All four files must point at the new repo URL or ArgoCD will refuse the Applications with `InvalidSpecError: repo not permitted`.
 
 **Verify:**
 ```bash
@@ -285,9 +326,9 @@ ArgoCD has already deployed the registry to the cluster (`infrastructure/registr
 **Workstation (where you run `docker build`):** install the registry's CA cert in Docker's per-host trust directory. Docker auto-discovers it on each request — no daemon restart needed.
 
 ```bash
-sudo mkdir -p /etc/docker/certs.d/registry.home-server.local
+sudo mkdir -p /etc/docker/certs.d/registry.claro-ai-crm.test
 kubectl get secret registry-tls -n registry -o jsonpath='{.data.tls\.crt}' | base64 -d | \
-  sudo tee /etc/docker/certs.d/registry.home-server.local/ca.crt >/dev/null
+  sudo tee /etc/docker/certs.d/registry.claro-ai-crm.test/ca.crt >/dev/null
 ```
 
 Docker Desktop on macOS/Windows: see [Docker's certs.d docs](https://docs.docker.com/engine/security/certificates/) — the VM has its own `/etc/docker/certs.d/` accessible via Settings.
@@ -299,15 +340,18 @@ Docker Desktop on macOS/Windows: see [Docker's certs.d docs](https://docs.docker
 kubectl get secret registry-tls -n registry -o jsonpath='{.data.tls\.crt}' | base64 -d | \
   ssh <user>@<k3s-host> "sudo tee /etc/rancher/k3s/registry-ca.crt >/dev/null"
 
+# Add registry hostname to /etc/hosts on the node (the k3s node must resolve it)
+ssh <user>@<k3s-host> "echo '127.0.0.1 registry.claro-ai-crm.test' | sudo tee -a /etc/hosts"
+
 # Then SSH in and write the registries.yaml. Substitute the credentials from
 # your password manager.
 ssh <user>@<k3s-host>
 sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<'EOF'
 configs:
-  "registry.home-server.local":
+  "registry.claro-ai-crm.test":
     auth:
-      username: <user>
-      password: <pass>
+      username: homelab
+      password: <pass from password manager>
     tls:
       ca_file: /etc/rancher/k3s/registry-ca.crt
 EOF
@@ -317,20 +361,31 @@ sudo systemctl restart k3s
 **Verify the loop:**
 ```bash
 # Login + push from workstation
-docker login registry.home-server.local            # creds from password manager
+docker login registry.claro-ai-crm.test            # creds from password manager
 docker pull alpine:latest
-docker tag alpine:latest registry.home-server.local/test/alpine:latest
-docker push registry.home-server.local/test/alpine:latest
+docker tag alpine:latest registry.claro-ai-crm.test/test/alpine:latest
+docker push registry.claro-ai-crm.test/test/alpine:latest
 
 # Confirm the cluster can pull it
-kubectl run smoketest --rm -it --image=registry.home-server.local/test/alpine:latest \
+kubectl run smoketest --rm -it --image=registry.claro-ai-crm.test/test/alpine:latest \
   --restart=Never -- echo hello
 # Expected output: hello
 ```
 
 ### Tier 9: ArgoCD reconciles everything else
 
-You're done with manual steps. Future changes flow through git:
+You're done with the bootstrap. Future infrastructure/app changes flow through git.
+
+**However, the claro-ai-crm application has additional manual steps** that must be done after ArgoCD syncs:
+
+1. **CoreDNS custom config** — in-cluster DNS for `*.claro-ai-crm.test`
+2. **Authentik OIDC setup** — provider + application creation via API
+3. **Prisma DB migrations** — run `prisma migrate deploy` via port-forward
+4. **First admin user** — promote from `BACK_OFFICE` to `ADMIN` via psql
+
+See [`docs/runbooks/claro-ai-crm-bootstrap.md`](./docs/runbooks/claro-ai-crm-bootstrap.md) for the complete procedure.
+
+Future changes flow through git:
 
 ```bash
 vim apps/postgres/base/cluster.yaml
@@ -428,7 +483,43 @@ Common Authentik 2026.x replacements: top-level `envFrom` / `env` / `envValueFro
 Reason: ArgoCD's `kubectl auth reconcile` step for namespaced RBAC (Role/RoleBinding) runs before `CreateNamespace=true` can create the namespace. Charts that ship their own RBAC trip this race.
 Fix: declare the `Namespace` as an explicit resource in the kustomize overlay with `argocd.argoproj.io/sync-wave: "-1"`. Requires the `apps` AppProject to allow the `Namespace` kind in its `clusterResourceWhitelist` — which is already configured for this repo. See `apps/authentik/overlays/home-server/namespace.yaml` for the pattern.
 
-### A `kubeseal` command failed but left an empty file
+### Node disk pressure after GCP resize
+
+**Symptom:** GCP disk resize completes but kubelet still reports `DiskPressure: True` and pods remain Pending.
+
+**Cause:** GCP resizes the disk at the block level; the Linux partition and filesystem must be expanded separately. The GCP guest agent usually handles `resize2fs` automatically, but the partition table update (`growpart`/`parted`) may need manual intervention.
+
+**Fix:**
+```bash
+# SSH to the node, check if partition expanded
+lsblk  # if sda shows 50G but sda1 shows 9.9G, partition needs expanding
+
+sudo parted /dev/sda resizepart 1 100%
+# resize2fs is usually already done by GCP agent; verify:
+df -h /   # should show new capacity
+```
+
+Then from workstation, remove the stale taint:
+```bash
+kubectl taint node <node-name> node.kubernetes.io/disk-pressure:NoSchedule-
+```
+
+See `docs/runbooks/ops-common-incidents.md` for full procedure.
+
+### CoreDNS AAAA query causes SERVFAIL despite A record resolving
+
+**Symptom:** `nslookup authentik.claro-ai-crm.test` shows both an IP address AND `SERVFAIL`. Pods using the hostname get `fetch failed` or `Could not resolve host`.
+
+**Root cause:** the CoreDNS `template IN A` plugin handles A queries but returns SERVFAIL for AAAA queries. Node.js and other resolvers make both queries; the SERVFAIL on AAAA causes the entire resolution to fail.
+
+**Fix:** ensure the `coredns-custom` ConfigMap includes an AAAA template returning `NOERROR`:
+```
+template IN AAAA claro-ai-crm.test {
+    rcode NOERROR
+}
+```
+
+### `kubeseal` command failed but left an empty file
 Reason: shell redirection `>` creates the file before the command runs. If kubeseal fails, the file exists at 0 bytes and would silently deploy nothing if committed.
 Fix: `rm` the empty file, re-run with correct flags, verify `wc -l <file>` is non-zero before committing.
 
