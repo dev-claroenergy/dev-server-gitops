@@ -7,10 +7,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - registry.home-server.local
+        - registry.claro-ai-crm.test
       secretName: registry-tls
   rules:
-    - host: registry.home-server.local
+    - host: registry.claro-ai-crm.test
       http:
         paths:
           - path: /
